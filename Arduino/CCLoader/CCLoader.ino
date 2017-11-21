@@ -33,9 +33,9 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 #define CMD_RD_CONFIG               0x24
 #define CMD_READ_STATUS             0x30
 #define CMD_RESUME                  0x4C
-#define CMD_DEBUG_INSTR_1B          (0x54|1)
-#define CMD_DEBUG_INSTR_2B          (0x54|2)
-#define CMD_DEBUG_INSTR_3B          (0x54|3)
+#define CMD_DEBUGSTR_1B          (0x54|1)
+#define CMD_DEBUGSTR_2B          (0x54|2)
+#define CMD_DEBUGSTR_3B          (0x54|3)
 #define CMD_BURST_WRITE             0x80
 #define CMD_GET_CHIP_ID             0x68
 
@@ -72,16 +72,23 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 //! Convert XREG register declaration to an XDATA integer address
 //#define XREG(addr)       ((unsigned char volatile __xdata *) 0)[addr]
 //#define FCTL            XREG( 0x6270 )
-//#define XREG_TO_INT(a)      ((unsigned short)(&(a)))
+//#define XREG_TOT(a)      ((unsigned short)(&(a)))
 
 // Commands to Bootloader
 #define SBEGIN                0x01
 #define SDATA                 0x02
 #define SRSP                  0x03
 #define SEND                  0x04
-#define ERRO                 0x05
-#define WAITING               0x00
-#define RECEIVING             0x01
+#define ERRO                  0x05
+#define READ_FLASH            0x06
+#define READ_CHIPID           0x07
+#define SAY_HELLO             0x08
+#define CHIP_ERASE            0x09
+
+#define STATE_WAITING         0
+#define STATE_RECEIVING       1
+#define STATE_BLOCKREAD       2
+
 
 // Debug control pins & the indicate LED
 int DD = 6;
@@ -231,7 +238,7 @@ unsigned char debug_command(unsigned char cmd, unsigned char *cmd_bytes,
 *           ProgrammerInit().
 * @return   None.
 ******************************************************************************/
-void debug_init(void)
+void debugit(void)
 {
     volatile unsigned char i;
 
@@ -350,22 +357,22 @@ void write_xdata_memory_block(unsigned short address,
     instr[0] = 0x90;
     instr[1] = HIBYTE(address);
     instr[2] = LOBYTE(address);
-    debug_command(CMD_DEBUG_INSTR_3B, instr, 3);
+    debug_command(CMD_DEBUGSTR_3B, instr, 3);
 
     for (i = 0; i < num_bytes; i++)
     {
         // MOV A, values[i]
         instr[0] = 0x74;
         instr[1] = values[i];
-        debug_command(CMD_DEBUG_INSTR_2B, instr, 2);
+        debug_command(CMD_DEBUGSTR_2B, instr, 2);
 
         // MOV @DPTR, A
         instr[0] = 0xF0;
-        debug_command(CMD_DEBUG_INSTR_1B, instr, 1);
+        debug_command(CMD_DEBUGSTR_1B, instr, 1);
 
         // INC DPTR
         instr[0] = 0xA3;
-        debug_command(CMD_DEBUG_INSTR_1B, instr, 1);
+        debug_command(CMD_DEBUGSTR_1B, instr, 1);
     }
 }
 
@@ -383,16 +390,16 @@ void write_xdata_memory(unsigned short address, unsigned char value)
     instr[0] = 0x90;
     instr[1] = HIBYTE(address);
     instr[2] = LOBYTE(address);
-    debug_command(CMD_DEBUG_INSTR_3B, instr, 3);
+    debug_command(CMD_DEBUGSTR_3B, instr, 3);
 
     // MOV A, values[i]
     instr[0] = 0x74;
     instr[1] = value;
-    debug_command(CMD_DEBUG_INSTR_2B, instr, 2);
+    debug_command(CMD_DEBUGSTR_2B, instr, 2);
 
     // MOV @DPTR, A
     instr[0] = 0xF0;
-    debug_command(CMD_DEBUG_INSTR_1B, instr, 1);
+    debug_command(CMD_DEBUGSTR_1B, instr, 1);
 }
 
 /**************************************************************************//**
@@ -408,11 +415,11 @@ unsigned char read_xdata_memory(unsigned short address)
     instr[0] = 0x90;
     instr[1] = HIBYTE(address);
     instr[2] = LOBYTE(address);
-    debug_command(CMD_DEBUG_INSTR_3B, instr, 3);
+    debug_command(CMD_DEBUGSTR_3B, instr, 3);
 
     // MOVX A, @DPTR
     instr[0] = 0xE0;
-    return debug_command(CMD_DEBUG_INSTR_1B, instr, 1);
+    return debug_command(CMD_DEBUGSTR_1B, instr, 1);
 }
 
 /**************************************************************************//**
@@ -437,17 +444,17 @@ void read_flash_memory_block(unsigned char bank,unsigned short flash_addr,
     instr[0] = 0x90;
     instr[1] = HIBYTE(xdata_addr);
     instr[2] = LOBYTE(xdata_addr);
-    debug_command(CMD_DEBUG_INSTR_3B, instr, 3);
+    debug_command(CMD_DEBUGSTR_3B, instr, 3);
 
     for (i = 0; i < num_bytes; i++)
     {
         // 3. Move value pointed to by DPTR to accumulator (MOVX A, @DPTR)
         instr[0] = 0xE0;
-        values[i] = debug_command(CMD_DEBUG_INSTR_1B, instr, 1);
+        values[i] = debug_command(CMD_DEBUGSTR_1B, instr, 1);
 
         // 4. Increment data pointer (INC DPTR)
         instr[0] = 0xA3;
-        debug_command(CMD_DEBUG_INSTR_1B, instr, 1);
+        debug_command(CMD_DEBUGSTR_1B, instr, 1);
     }
 }
 
@@ -536,12 +543,12 @@ void loop()
   unsigned char Continue = 0;
   unsigned char Verify = 0;
   
-  while(!Continue)     // Wait for starting
+  while(Continue != 1)     // Wait for starting
   {  
     
-    if(Serial.available()==2)
+    if (Serial.available() == 2)
     {      
-      if(Serial.read() == SBEGIN)
+      if (Serial.read() == SBEGIN)
       {
         Verify = Serial.read();
         Continue = 1;
@@ -552,41 +559,41 @@ void loop()
       }
     }
   }
+  Serial.write(0x77);
 
-  debug_init();
+  debugit();
   chip_id = read_chip_id();
-  if(chip_id == 0) 
-  {
-    Serial.write(ERRO);  
-    return; // No chip detected, run loop again.
-  }
-  
+  //if(chip_id == 0) 
+  //{
+  //  Serial.write(ERRO);  
+  //  return; // No chip detected, run loop again.
+  //}
+
   RunDUP();
-  debug_init();
-  
-  chip_erase();
+  debugit();
+
   RunDUP();
-  debug_init();
-  
+  debugit();
+
   // Switch DUP to external crystal osc. (XOSC) and wait for it to be stable.
   // This is recommended if XOSC is available during programming. If
   // XOSC is not available, comment out these two lines.
-  write_xdata_memory(DUP_CLKCONCMD, 0x80);
-  while (read_xdata_memory(DUP_CLKCONSTA) != 0x80);//0x80)
+  //write_xdata_memory(DUP_CLKCONCMD, 0x80);
+  //while (read_xdata_memory(DUP_CLKCONSTA) != 0x80);//0x80)
   
   // Enable DMA (Disable DMA_PAUSE bit in debug configuration)
   debug_config = 0x22;
   debug_command(CMD_WR_CONFIG, &debug_config, 1);
   
   // Program data (start address must be word aligned [32 bit])
-  Serial.write(SRSP);    // Request data blocks
+  Serial.write(0xEA);    // Request data blocks
   digitalWrite(LED, HIGH);  
   unsigned char Done = 0;
-  unsigned char State = WAITING;
+  unsigned char State = STATE_WAITING;
   unsigned char  rxBuf[514]; 
   unsigned int BufIndex = 0;
   unsigned int addr = 0x0000;
-  while(!Done)
+  while(1)
   {
     while(Serial.available())
     {
@@ -595,20 +602,32 @@ void loop()
       switch (State)
       {
         // Bootloader is waiting for a new block, each block begin with a flag byte
-        case WAITING:
+        case STATE_WAITING:
         {
           if(SDATA == ch)  // Incoming bytes are data
           {
-            State = RECEIVING;
-          }
+            State = STATE_RECEIVING;
+          } 
           else if(SEND == ch)   // End receiving firmware
           {
             Done = 1;           // Exit while(1) in main function
           }
+          else if (READ_FLASH == ch)
+          {
+            State = STATE_BLOCKREAD;
+          }
+          else if (SAY_HELLO == ch)
+          {
+            Serial.write('h');
+          }
+          else if (READ_CHIPID == ch)
+          {
+            Serial.write(chip_id);
+          }
           break;
         }      
         // Bootloader is receiving block data  
-        case RECEIVING:
+        case STATE_RECEIVING:
         {          
           rxBuf[BufIndex] = ch;
           BufIndex++;            
@@ -623,7 +642,7 @@ void loop()
             uint16_t CheckSum_t = rxBuf[512]<<8 | rxBuf[513];
             if(CheckSum_t != CheckSum)
             {
-              State = WAITING;
+              State = STATE_WAITING;
               Serial.write(ERRO);                    
               chip_erase();
               return;
@@ -640,7 +659,7 @@ void loop()
                 if(read_data[i] != rxBuf[i]) 
                 {
                   // Fail
-                  State = WAITING;
+                  State = STATE_WAITING;
                   Serial.write(ERRO);                    
                   chip_erase();
                   return;
@@ -648,11 +667,24 @@ void loop()
               }
             }
             addr += (unsigned int)128;              
-            State = WAITING;
+            State = STATE_WAITING;
             Serial.write(SRSP);
           }
           break;
-        }      
+        }
+        case STATE_BLOCKREAD:
+        {
+          addr = ch * 128;
+          unsigned char read_data[512];
+          unsigned int  offset = (addr % (512 * 16)) * 4;
+          unsigned char bank = addr / (512 * 16);
+          read_flash_memory_block(bank, offset, 512, read_data); // Bank, address, count, dest. 
+
+          State = STATE_WAITING;
+          
+          Serial.write(read_data, 512);                    
+          break;
+        }
         default:
           break;
       }
